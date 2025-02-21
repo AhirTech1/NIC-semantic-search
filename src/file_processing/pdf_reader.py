@@ -13,4 +13,4 @@ def extract_text_from_pdf(file_path):
                 text += page.extract_text() or ""
     except Exception as e:
         print(f"Error processing PDF: {e}")
-    return text
+    return text ##save to a new text file
