@@ -2,6 +2,10 @@
 __pycache__/
 *.py[cod]
 *$py.class
+# Ignore extracted text files and temporary files
+*.txt
+*.log
+tmp/
 
 # C extensions
 *.so
