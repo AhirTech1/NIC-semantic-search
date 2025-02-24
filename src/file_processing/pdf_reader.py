@@ -1,71 +1,81 @@
-import fitz  # PyMuPDF for PDF extraction
+import fitz  # PyMuPDF
 import tempfile
-import re  # For initial cleaning
+import re
+import os  # For handling directories
 from transformers import LongformerTokenizer, LongformerForMaskedLM
 import torch
 
-# Load Longformer tokenizer and model
+
+# Initialize Longformer tokenizer and model
 tokenizer = LongformerTokenizer.from_pretrained("allenai/longformer-base-4096")
 model = LongformerForMaskedLM.from_pretrained("allenai/longformer-base-4096")
+# Device setup
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = model.to(device)
 
-
-# Function to clean and preprocess extracted text (basic)
-def clean_text(raw_text):
-    cleaned_text = re.sub(r'\n\d+\n', '\n', raw_text)  # Remove standalone numbers
-    cleaned_text = re.sub(r'\n{2,}', '\n\n', cleaned_text)  # Remove multiple newlines
-    cleaned_text = re.sub(r'Page \d+', '', cleaned_text)  # Remove page numbers
-    cleaned_text = re.sub(r'NSS Report no\. \d+:.*?\n', '', cleaned_text)  # Remove report references
-    cleaned_text = cleaned_text.lower()  # Lowercase text
-    cleaned_text = cleaned_text.strip()  # Remove unnecessary spaces
+# Function to clean text using basic regex first
+def basic_clean_text(raw_text):
+    cleaned_text = re.sub(r'\n\d+\n', '\n', raw_text)
+    cleaned_text = re.sub(r'\n{2,}', '\n\n', cleaned_text)
+    cleaned_text = re.sub(r'Page \d+', '', cleaned_text)
+    cleaned_text = re.sub(r'NSS Report no\. \d+:.*?\n', '', cleaned_text)
+    cleaned_text = cleaned_text.lower()
+    cleaned_text = cleaned_text.strip()
     return cleaned_text
 
-
-# Function to split large text into smaller manageable chunks
-def split_text(text, max_length=4000):
-    words = text.split()
-    chunks = []
-    for i in range(0, len(words), max_length):
-        chunk = ' '.join(words[i:i + max_length])
-        chunks.append(chunk)
-    return chunks
-
-
-# Function to further process and clean text using Longformer
-def clean_text_with_longformer(text):
-    inputs = tokenizer(text, return_tensors="pt", max_length=4096, truncation=True).to(device)
+# Function to clean text using Longformer and handle device correctly
+def clean_text_with_longformer(text, device):
+    inputs = tokenizer(text, return_tensors="pt", max_length=4096, truncation=True).to(device)  # Move inputs to GPU/CPU
     with torch.no_grad():
-        outputs = model(**inputs, labels=inputs.input_ids)
-    cleaned_text = tokenizer.decode(inputs.input_ids[0], skip_special_tokens=True)
+        outputs = model(**inputs, labels=inputs["input_ids"])
+    cleaned_text = tokenizer.decode(inputs["input_ids"][0], skip_special_tokens=True)
     return cleaned_text
 
-
-# Extract, clean, and prepare text from PDF using Longformer
-def extract_and_prepare_text_for_nlp(pdf_path):
+# Function to extract text and clean using Longformer from a single PDF
+def extract_and_clean_text_from_pdf(pdf_path, device):
     text = ""
     with fitz.open(pdf_path) as doc:
         for page in doc:
             text += page.get_text()
 
-    # Basic initial cleaning
-    cleaned_text = clean_text(text)
+    # Basic text cleaning
+    basic_cleaned_text = basic_clean_text(text)
 
-    # Split into manageable chunks for Longformer
-    text_chunks = split_text(cleaned_text)
+    # Further clean using Longformer
+    longformer_cleaned_text = clean_text_with_longformer(basic_cleaned_text, device)
 
-    # Process each chunk using Longformer for deeper cleaning
-    final_cleaned_chunks = [clean_text_with_longformer(chunk) for chunk in text_chunks]
-
-    # Combine all cleaned chunks back together
-    final_cleaned_text = ' '.join(final_cleaned_chunks)
-
-    # Save the cleaned text to a temporary file
+    # Save cleaned text temporarily
     with tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode='w', encoding='utf-8') as temp_file:
-        temp_file.write(final_cleaned_text)
-        return temp_file.name  # Return path to the cleaned temporary file
+        temp_file.write(longformer_cleaned_text)
+        return temp_file.name  # Return file path
 
+# Function to process multiple PDFs using Longformer
+def process_multiple_pdfs(pdf_paths, device):
+    processed_files = []
+    for pdf_path in pdf_paths:
+        processed_file = extract_and_clean_text_from_pdf(pdf_path, device)
+        processed_files.append(processed_file)
+        print(f"Processed and cleaned PDF with Longformer: {pdf_path} -> {processed_file}")
+    return processed_files
 
-# Example usage
-cleaned_file_path = extract_and_prepare_text_for_nlp('AnnualReport.pdf')
-print(f"Final cleaned text ready for NLP model at: {cleaned_file_path}")
+# Function to combine all processed files into one
+def combine_processed_files(processed_files, output_filename="combined_output.txt"):
+    combined_text = ""
+    for file_path in processed_files:
+        with open(file_path, 'r', encoding='utf-8') as file:
+            combined_text += file.read() + "\n\n"  # Add spacing between files
+
+    # Save combined text into a single file
+    with open(output_filename, 'w', encoding='utf-8') as output_file:
+        output_file.write(combined_text)
+
+    print(f"All processed files have been combined into: {output_filename}")
+    return output_filename
+
+# Example usage for multiple PDFs
+pdf_directory = 'pdfs'  # Folder containing PDFs
+pdf_files = [os.path.join(pdf_directory, file) for file in os.listdir(pdf_directory) if file.endswith('.pdf')]
+processed_pdf_files = process_multiple_pdfs(pdf_files, device)
+# Combine all processed files into one
+final_combined_file = combine_processed_files(processed_pdf_files)
+print("Final output file : ",final_combined_file)
