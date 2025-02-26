@@ -1,65 +1,142 @@
 import os
-import re
 import torch
+from transformers import pipeline
 from sentence_transformers import SentenceTransformer, util
 
-# Define paths to extracted text files
-pdf_text_file = "/home/garuda/PycharmProjects/NIC-semantic-search/src/file_processing/combined_output.txt"  # From pdf_reader.py
-image_text_file = "/home/garuda/PycharmProjects/NIC-semantic-search/src/file_processing/combined_image_output.txt"  # From image_reader.py
+# Load BERT QA Model (for extracting answers)
+print("🔄 Loading QA model...")
+qa_pipeline = pipeline("question-answering", model="bert-large-uncased-whole-word-masking-finetuned-squad")
+print("✅ QA model loaded.")
 
-# Load BERT model
-print("Loading BERT model...")
-model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-print("BERT model loaded successfully.")
+# Load BERT-based sentence transformer (for similarity search)
+print("🔄 Loading similarity model...")
+similarity_model = SentenceTransformer("all-MiniLM-L6-v2")  # Lighter model for faster execution
+print("✅ Similarity model loaded.")
 
-# Function to clean text (removes unwanted characters)
-def clean_text(text):
-    text = re.sub(r"[^\x00-\x7F]+", " ", text)  # Remove non-ASCII characters
-    text = re.sub(r"[\uFFFD]", " ", text)  # Remove unknown characters (�)
-    text = re.sub(r"\s+", " ", text)  # Normalize spaces
-    text = text.replace("", "").replace("", "").replace("o", "of")  # Fix common OCR issues
-    return text.strip()
+# Paths to extracted text files
+pdf_text_path = "/home/garuda/PycharmProjects/NIC-semantic-search/src/file_processing/combined_output.txt"
+image_text_path = "/home/garuda/PycharmProjects/NIC-semantic-search/src/file_processing/combined_image_output.txt"
 
-# Function to read and clean text files
+
 def read_text_file(file_path):
+    """ Reads a text file and returns its content as a string """
+    print(f"📂 Reading text file: {file_path}")
     if os.path.exists(file_path):
-        print(f"Reading text from: {file_path}")
         with open(file_path, "r", encoding="utf-8") as file:
-            return [clean_text(line.strip()) for line in file if line.strip()]  # Clean each line
+            content = file.read().strip()
+            print(f"📜 Loaded {len(content)} characters from {file_path}")
+            return content
     else:
-        print(f"Warning: {file_path} not found.")
-        return []
+        print(f"❌ File not found: {file_path}")
+        return ""
 
-# Load text as a list of lines
-pdf_text = read_text_file(pdf_text_file)
-image_text = read_text_file(image_text_file)
 
-# Merge both text sources
-all_text = pdf_text + image_text
+def chunk_text(text, max_length=1000):
+    """ Splits text into larger chunks to improve retrieval accuracy """
+    print(f"✂️ Chunking text (Max length per chunk: {max_length} characters)")
+    sentences = text.split(". ")
+    chunks, current_chunk = [], ""
 
-if not all_text:
-    print("No text data available. Exiting program.")
-    exit()
+    for sentence in sentences:
+        if len(current_chunk) + len(sentence) < max_length:
+            current_chunk += sentence + ". "
+        else:
+            chunks.append(current_chunk.strip())
+            current_chunk = sentence + ". "
 
-# Encode each text line
-print("Encoding text in chunks...")
-text_embeddings = model.encode(all_text, convert_to_tensor=True)
-print(f"Encoded {len(all_text)} text chunks.")
+    if current_chunk:
+        chunks.append(current_chunk.strip())
 
-# Get user query
-query = input("\nEnter your search query: ")
-query_embedding = model.encode(query, convert_to_tensor=True)
+    print(f"✅ Created {len(chunks)} chunks.")
+    return chunks
 
-# Compute similarity scores
-print("Computing similarity scores...")
-similarities = util.pytorch_cos_sim(query_embedding, text_embeddings)[0]
-top_match_index = torch.argmax(similarities).item()
 
-# Retrieve surrounding lines for better context
-window_size = 2  # Number of surrounding lines to include
-start_idx = max(0, top_match_index - window_size)
-end_idx = min(len(all_text), top_match_index + window_size + 1)
+def retrieve_relevant_context(query, text, top_k=3, min_similarity=0.4):
+    """ Retrieves the most relevant paragraph using semantic similarity """
+    print("\n🔍 Retrieving relevant context...")
+    chunks = chunk_text(text)  # Split text into manageable chunks
 
-# Display most relevant text with context
-print("\nMost relevant text based on your query (cleaned):")
-print("\n".join(all_text[start_idx:end_idx]))
+    if not chunks:
+        print("⚠️ No chunks available to search.")
+        return ""
+
+    print("🔄 Encoding query...")
+    query_embedding = similarity_model.encode(query, convert_to_tensor=True)
+
+    print("🔄 Encoding document chunks...")
+    chunk_embeddings = similarity_model.encode(chunks, convert_to_tensor=True)
+
+    print("🔄 Calculating similarities...")
+    similarities = util.pytorch_cos_sim(query_embedding, chunk_embeddings)[0]
+
+    # Get top_k most relevant chunks
+    top_indices = torch.topk(similarities, top_k).indices.tolist()
+
+    # Filter out chunks with low similarity scores
+    filtered_chunks = []
+    for idx in top_indices:
+        score = similarities[idx].item()
+        if score >= min_similarity:
+            print(f"✅ Chunk {idx} selected (Similarity: {score:.2f})")
+            filtered_chunks.append(chunks[idx])
+        else:
+            print(f"⚠️ Chunk {idx} ignored (Low similarity: {score:.2f})")
+
+    if not filtered_chunks:
+        print("❌ No relevant context found above similarity threshold.")
+        return ""
+
+    return " ".join(filtered_chunks)
+
+
+def answer_question(question, context):
+    """ Uses the BERT QA model to extract the answer from the most relevant context """
+    print("\n🤖 Answering the question using the QA model...")
+    response = qa_pipeline(question=question, context=context)
+    print(f"✅ Model response: {response}")
+    return response["answer"]
+
+
+def main():
+    print("\n🔄 Loading text data...")
+
+    # Read extracted text from files
+    pdf_text = read_text_file(pdf_text_path)
+    image_text = read_text_file(image_text_path)
+
+    # Combine both sources
+    combined_text = pdf_text + "\n" + image_text
+
+    if not combined_text.strip():
+        print("❌ No text data found! Please check if your text extraction process worked correctly.")
+        return
+
+    print("✅ Text data loaded successfully. Ready for queries.")
+
+    while True:
+        query = input("\nEnter your search query (or type 'exit' to quit): ").strip()
+        if query.lower() == "exit":
+            print("🚪 Exiting...")
+            break
+
+        print("\n🔍 Finding relevant information...")
+
+        # Retrieve the most relevant context
+        try:
+            context = retrieve_relevant_context(query, combined_text)
+            if not context.strip():
+                print("⚠️ No relevant context found. Try rephrasing your question.")
+                continue
+
+            print("\n📖 Most Relevant Context:\n", context)
+
+            # Answer the question using the QA model
+            answer = answer_question(query, context)
+            print("\n💡 Answer:", answer)
+
+        except Exception as e:
+            print(f"❌ Error: {str(e)}")
+
+
+if __name__ == "__main__":
+    main()
